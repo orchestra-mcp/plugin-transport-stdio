@@ -1,0 +1,18 @@
+# Binaries
+transport-stdio
+bin/
+
+# Go
+*.test
+*.out
+vendor/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
