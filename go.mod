@@ -3,8 +3,8 @@ module github.com/orchestra-mcp/plugin-transport-stdio
 go 1.23
 
 require (
-	github.com/orchestra-mcp/gen-go v0.0.0
-	github.com/orchestra-mcp/sdk-go v0.0.0
+	github.com/orchestra-mcp/gen-go v0.1.0
+	github.com/orchestra-mcp/sdk-go v0.1.0
 	google.golang.org/protobuf v1.36.11
 )
 
@@ -22,9 +22,4 @@ require (
 	golang.org/x/sync v0.8.0 // indirect
 	golang.org/x/sys v0.23.0 // indirect
 	golang.org/x/tools v0.22.0 // indirect
-)
-
-replace (
-	github.com/orchestra-mcp/gen-go => ../gen-go
-	github.com/orchestra-mcp/sdk-go => ../sdk-go
 )
