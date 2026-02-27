@@ -3,8 +3,8 @@ module github.com/orchestra-mcp/plugin-transport-stdio
 go 1.23
 
 require (
-	github.com/orchestra-mcp/gen-go v0.0.2-beta
-	github.com/orchestra-mcp/sdk-go v0.0.2-beta
+	github.com/orchestra-mcp/gen-go v0.0.3-beta
+	github.com/orchestra-mcp/sdk-go v0.0.3-beta
 	google.golang.org/protobuf v1.36.11
 )
 
