@@ -1,0 +1,25 @@
+{
+    "name": "orchestra-mcp/plugin-transport-stdio",
+    "description": "MCP stdio transport plugin (JSON-RPC over stdin/stdout).",
+    "type": "plugin",
+    "license": "MIT",
+    "homepage": "https://orchestra-mcp.dev",
+    "support": {
+        "issues": "https://github.com/orchestra-mcp/plugin-transport-stdio/issues",
+        "source": "https://github.com/orchestra-mcp/plugin-transport-stdio"
+    },
+    "require": {
+        "orchestra-mcp/gen-go": "^0.1.0",
+        "orchestra-mcp/sdk-go": "^0.1.0"
+    },
+    "bin": "transport-stdio",
+    "extra": {
+        "plugin-id": "transport.stdio",
+        "provides": [
+            "transport"
+        ],
+        "branch-alias": {
+            "dev-master": "0.1.x-dev"
+        }
+    }
+}
