@@ -111,6 +111,10 @@ func (t *StdioTransport) dispatch(ctx context.Context, req *protocol.JSONRPCRequ
 		return t.handleToolsList(ctx, req)
 	case "tools/call":
 		return t.handleToolsCall(ctx, req)
+	case "prompts/list":
+		return t.handlePromptsList(ctx, req)
+	case "prompts/get":
+		return t.handlePromptsGet(ctx, req)
 	default:
 		// Notifications get no response.
 		if strings.HasPrefix(req.Method, "notifications/") {

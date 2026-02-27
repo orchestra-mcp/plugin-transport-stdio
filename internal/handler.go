@@ -19,7 +19,8 @@ func (t *StdioTransport) handleInitialize(req *protocol.JSONRPCRequest) *protoco
 		Result: protocol.MCPInitializeResult{
 			ProtocolVersion: "2024-11-05",
 			Capabilities: protocol.MCPServerCapabilities{
-				Tools: &protocol.MCPToolsCapability{},
+				Tools:   &protocol.MCPToolsCapability{},
+				Prompts: &protocol.MCPPromptsCapability{},
 			},
 			ServerInfo: protocol.MCPServerInfo{
 				Name:    "orchestra",
@@ -172,6 +173,131 @@ func (t *StdioTransport) handleToolsCall(ctx context.Context, req *protocol.JSON
 	}
 
 	mcpResult := ToolResponseToMCP(tc)
+
+	return &protocol.JSONRPCResponse{
+		JSONRPC: "2.0",
+		ID:      req.ID,
+		Result:  mcpResult,
+	}
+}
+
+// promptsListResult is the JSON shape for a prompts/list response.
+type promptsListResult struct {
+	Prompts []protocol.MCPPromptDefinition `json:"prompts"`
+}
+
+// handlePromptsList queries the orchestrator for all registered prompts and
+// converts them to MCP format.
+func (t *StdioTransport) handlePromptsList(ctx context.Context, req *protocol.JSONRPCRequest) *protocol.JSONRPCResponse {
+	resp, err := t.sender.Send(ctx, &pluginv1.PluginRequest{
+		RequestId: fmt.Sprintf("stdio-lp-%v", req.ID),
+		Request: &pluginv1.PluginRequest_ListPrompts{
+			ListPrompts: &pluginv1.ListPromptsRequest{},
+		},
+	})
+	if err != nil {
+		return &protocol.JSONRPCResponse{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Error: &protocol.JSONRPCError{
+				Code:    protocol.InternalError,
+				Message: fmt.Sprintf("orchestrator list_prompts failed: %v", err),
+			},
+		}
+	}
+
+	lp := resp.GetListPrompts()
+	if lp == nil {
+		return &protocol.JSONRPCResponse{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Error: &protocol.JSONRPCError{
+				Code:    protocol.InternalError,
+				Message: "unexpected response type from orchestrator",
+			},
+		}
+	}
+
+	mcpPrompts := make([]protocol.MCPPromptDefinition, 0, len(lp.Prompts))
+	for _, pd := range lp.Prompts {
+		mcpPrompts = append(mcpPrompts, PromptDefinitionToMCP(pd))
+	}
+
+	return &protocol.JSONRPCResponse{
+		JSONRPC: "2.0",
+		ID:      req.ID,
+		Result:  promptsListResult{Prompts: mcpPrompts},
+	}
+}
+
+// promptGetParams is the expected shape of params for a prompts/get request.
+type promptGetParams struct {
+	Name      string            `json:"name"`
+	Arguments map[string]string `json:"arguments,omitempty"`
+}
+
+// handlePromptsGet parses the prompt name and arguments from the JSON-RPC
+// request, sends a PromptGetRequest to the orchestrator, and converts the
+// response to MCP format.
+func (t *StdioTransport) handlePromptsGet(ctx context.Context, req *protocol.JSONRPCRequest) *protocol.JSONRPCResponse {
+	var params promptGetParams
+	if req.Params != nil {
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			return &protocol.JSONRPCResponse{
+				JSONRPC: "2.0",
+				ID:      req.ID,
+				Error: &protocol.JSONRPCError{
+					Code:    protocol.InvalidParams,
+					Message: fmt.Sprintf("invalid params: %v", err),
+				},
+			}
+		}
+	}
+
+	if params.Name == "" {
+		return &protocol.JSONRPCResponse{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Error: &protocol.JSONRPCError{
+				Code:    protocol.InvalidParams,
+				Message: "missing required parameter: name",
+			},
+		}
+	}
+
+	resp, err := t.sender.Send(ctx, &pluginv1.PluginRequest{
+		RequestId: fmt.Sprintf("stdio-pg-%v", req.ID),
+		Request: &pluginv1.PluginRequest_PromptGet{
+			PromptGet: &pluginv1.PromptGetRequest{
+				PromptName: params.Name,
+				Arguments:  params.Arguments,
+			},
+		},
+	})
+	if err != nil {
+		return &protocol.JSONRPCResponse{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Error: &protocol.JSONRPCError{
+				Code:    protocol.InternalError,
+				Message: fmt.Sprintf("orchestrator prompt_get failed: %v", err),
+			},
+		}
+	}
+
+	pg := resp.GetPromptGet()
+	if pg == nil {
+		return &protocol.JSONRPCResponse{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Error: &protocol.JSONRPCError{
+				Code:    protocol.InternalError,
+				Message: "unexpected response type from orchestrator",
+			},
+		}
+	}
+
+	mcpResult := PromptGetResponseToMCP(pg)
 
 	return &protocol.JSONRPCResponse{
 		JSONRPC: "2.0",

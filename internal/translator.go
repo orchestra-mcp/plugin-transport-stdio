@@ -95,6 +95,46 @@ func MapToStruct(m map[string]any) (*structpb.Struct, error) {
 	return structpb.NewStruct(m)
 }
 
+// PromptDefinitionToMCP converts a protobuf PromptDefinition to an
+// MCP-compatible MCPPromptDefinition.
+func PromptDefinitionToMCP(pd *pluginv1.PromptDefinition) protocol.MCPPromptDefinition {
+	args := make([]protocol.MCPPromptArgument, 0, len(pd.GetArguments()))
+	for _, a := range pd.GetArguments() {
+		args = append(args, protocol.MCPPromptArgument{
+			Name:        a.GetName(),
+			Description: a.GetDescription(),
+			Required:    a.GetRequired(),
+		})
+	}
+	return protocol.MCPPromptDefinition{
+		Name:        pd.GetName(),
+		Description: pd.GetDescription(),
+		Arguments:   args,
+	}
+}
+
+// PromptGetResponseToMCP converts a protobuf PromptGetResponse to an MCP
+// MCPPromptResult.
+func PromptGetResponseToMCP(resp *pluginv1.PromptGetResponse) protocol.MCPPromptResult {
+	msgs := make([]protocol.MCPPromptMessage, 0, len(resp.GetMessages()))
+	for _, m := range resp.GetMessages() {
+		msg := protocol.MCPPromptMessage{
+			Role: m.GetRole(),
+		}
+		if c := m.GetContent(); c != nil {
+			msg.Content = protocol.MCPContent{
+				Type: c.GetType(),
+				Text: c.GetText(),
+			}
+		}
+		msgs = append(msgs, msg)
+	}
+	return protocol.MCPPromptResult{
+		Description: resp.GetDescription(),
+		Messages:    msgs,
+	}
+}
+
 // valueToInterface converts a protobuf Value to a native Go interface.
 func valueToInterface(v *structpb.Value) any {
 	if v == nil {

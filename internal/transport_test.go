@@ -415,6 +415,196 @@ func TestEmptyLines(t *testing.T) {
 	}
 }
 
+// --- Prompts tests ---
+
+func TestInitializeHasPromptsCapability(t *testing.T) {
+	reqJSON := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0.0"}}}`
+
+	raw := runSingleRequest(t, &mockSender{}, reqJSON)
+	resp := parseJSONRPCResponse(t, raw)
+
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %+v", resp.Error)
+	}
+
+	resultBytes, _ := json.Marshal(resp.Result)
+	var initResult protocol.MCPInitializeResult
+	if err := json.Unmarshal(resultBytes, &initResult); err != nil {
+		t.Fatalf("unmarshal init result: %v", err)
+	}
+
+	if initResult.Capabilities.Prompts == nil {
+		t.Error("expected capabilities.prompts to be set")
+	}
+}
+
+func TestPromptsList(t *testing.T) {
+	sender := &mockSender{
+		sendFunc: func(ctx context.Context, req *pluginv1.PluginRequest) (*pluginv1.PluginResponse, error) {
+			if req.GetListPrompts() == nil {
+				t.Error("expected ListPrompts request")
+			}
+			return &pluginv1.PluginResponse{
+				RequestId: req.RequestId,
+				Response: &pluginv1.PluginResponse_ListPrompts{
+					ListPrompts: &pluginv1.ListPromptsResponse{
+						Prompts: []*pluginv1.PromptDefinition{
+							{
+								Name:        "setup-project",
+								Description: "Guide setting up a new project",
+								Arguments: []*pluginv1.PromptArgument{
+									{Name: "project_name", Description: "Name of the project", Required: true},
+								},
+							},
+							{
+								Name:        "audit-packs",
+								Description: "Audit installed packs",
+							},
+						},
+					},
+				},
+			}, nil
+		},
+	}
+
+	reqJSON := `{"jsonrpc":"2.0","id":2,"method":"prompts/list"}`
+	raw := runSingleRequest(t, sender, reqJSON)
+	resp := parseJSONRPCResponse(t, raw)
+
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %+v", resp.Error)
+	}
+
+	resultBytes, _ := json.Marshal(resp.Result)
+	var listResult promptsListResult
+	if err := json.Unmarshal(resultBytes, &listResult); err != nil {
+		t.Fatalf("unmarshal prompts list result: %v", err)
+	}
+
+	if len(listResult.Prompts) != 2 {
+		t.Fatalf("expected 2 prompts, got %d", len(listResult.Prompts))
+	}
+
+	p := listResult.Prompts[0]
+	if p.Name != "setup-project" {
+		t.Errorf("prompt name: got %q, want %q", p.Name, "setup-project")
+	}
+	if p.Description != "Guide setting up a new project" {
+		t.Errorf("prompt description: got %q", p.Description)
+	}
+	if len(p.Arguments) != 1 {
+		t.Fatalf("expected 1 argument, got %d", len(p.Arguments))
+	}
+	if p.Arguments[0].Name != "project_name" {
+		t.Errorf("argument name: got %q", p.Arguments[0].Name)
+	}
+	if !p.Arguments[0].Required {
+		t.Error("expected argument to be required")
+	}
+}
+
+func TestPromptsGet(t *testing.T) {
+	sender := &mockSender{
+		sendFunc: func(ctx context.Context, req *pluginv1.PluginRequest) (*pluginv1.PluginResponse, error) {
+			pg := req.GetPromptGet()
+			if pg == nil {
+				t.Error("expected PromptGet request")
+				return nil, fmt.Errorf("expected PromptGet request")
+			}
+			if pg.PromptName != "setup-project" {
+				t.Errorf("prompt name: got %q, want %q", pg.PromptName, "setup-project")
+			}
+			if pg.Arguments["project_name"] != "demo" {
+				t.Errorf("argument project_name: got %q, want %q", pg.Arguments["project_name"], "demo")
+			}
+
+			return &pluginv1.PluginResponse{
+				RequestId: req.RequestId,
+				Response: &pluginv1.PluginResponse_PromptGet{
+					PromptGet: &pluginv1.PromptGetResponse{
+						Description: "Set up a new project with recommended packs",
+						Messages: []*pluginv1.PromptMessage{
+							{
+								Role: "user",
+								Content: &pluginv1.ContentBlock{
+									Type: "text",
+									Text: "Set up project 'demo'.",
+								},
+							},
+						},
+					},
+				},
+			}, nil
+		},
+	}
+
+	reqJSON := `{"jsonrpc":"2.0","id":3,"method":"prompts/get","params":{"name":"setup-project","arguments":{"project_name":"demo"}}}`
+	raw := runSingleRequest(t, sender, reqJSON)
+	resp := parseJSONRPCResponse(t, raw)
+
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %+v", resp.Error)
+	}
+
+	resultBytes, _ := json.Marshal(resp.Result)
+	var promptResult protocol.MCPPromptResult
+	if err := json.Unmarshal(resultBytes, &promptResult); err != nil {
+		t.Fatalf("unmarshal prompt result: %v", err)
+	}
+
+	if promptResult.Description != "Set up a new project with recommended packs" {
+		t.Errorf("description: got %q", promptResult.Description)
+	}
+	if len(promptResult.Messages) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(promptResult.Messages))
+	}
+	msg := promptResult.Messages[0]
+	if msg.Role != "user" {
+		t.Errorf("role: got %q, want %q", msg.Role, "user")
+	}
+	if msg.Content.Type != "text" {
+		t.Errorf("content type: got %q, want %q", msg.Content.Type, "text")
+	}
+	if msg.Content.Text != "Set up project 'demo'." {
+		t.Errorf("content text: got %q", msg.Content.Text)
+	}
+}
+
+func TestPromptsGetMissingName(t *testing.T) {
+	reqJSON := `{"jsonrpc":"2.0","id":6,"method":"prompts/get","params":{"arguments":{}}}`
+	raw := runSingleRequest(t, &mockSender{}, reqJSON)
+	resp := parseJSONRPCResponse(t, raw)
+
+	if resp.Error == nil {
+		t.Fatal("expected error for missing prompt name")
+	}
+	if resp.Error.Code != protocol.InvalidParams {
+		t.Errorf("error code: got %d, want %d", resp.Error.Code, protocol.InvalidParams)
+	}
+	if !strings.Contains(resp.Error.Message, "name") {
+		t.Errorf("error message should mention 'name', got: %s", resp.Error.Message)
+	}
+}
+
+func TestPromptsListNetworkError(t *testing.T) {
+	sender := &mockSender{
+		sendFunc: func(ctx context.Context, req *pluginv1.PluginRequest) (*pluginv1.PluginResponse, error) {
+			return nil, fmt.Errorf("connection timeout")
+		},
+	}
+
+	reqJSON := `{"jsonrpc":"2.0","id":7,"method":"prompts/list"}`
+	raw := runSingleRequest(t, sender, reqJSON)
+	resp := parseJSONRPCResponse(t, raw)
+
+	if resp.Error == nil {
+		t.Fatal("expected JSON-RPC error for network failure")
+	}
+	if resp.Error.Code != protocol.InternalError {
+		t.Errorf("error code: got %d, want %d", resp.Error.Code, protocol.InternalError)
+	}
+}
+
 // --- Translator tests ---
 
 func TestStructToMap(t *testing.T) {
@@ -571,6 +761,64 @@ func TestToolResponseToMCPFallback(t *testing.T) {
 	}
 	if m["id"] != "abc-123" {
 		t.Errorf("fallback id: got %v", m["id"])
+	}
+}
+
+func TestPromptDefinitionToMCP(t *testing.T) {
+	pd := &pluginv1.PromptDefinition{
+		Name:        "test-prompt",
+		Description: "A test prompt",
+		Arguments: []*pluginv1.PromptArgument{
+			{Name: "arg1", Description: "First arg", Required: true},
+			{Name: "arg2", Description: "Second arg", Required: false},
+		},
+	}
+
+	mcp := PromptDefinitionToMCP(pd)
+	if mcp.Name != "test-prompt" {
+		t.Errorf("name: got %q", mcp.Name)
+	}
+	if mcp.Description != "A test prompt" {
+		t.Errorf("description: got %q", mcp.Description)
+	}
+	if len(mcp.Arguments) != 2 {
+		t.Fatalf("expected 2 arguments, got %d", len(mcp.Arguments))
+	}
+	if mcp.Arguments[0].Name != "arg1" || !mcp.Arguments[0].Required {
+		t.Errorf("arg1: got %+v", mcp.Arguments[0])
+	}
+	if mcp.Arguments[1].Name != "arg2" || mcp.Arguments[1].Required {
+		t.Errorf("arg2: got %+v", mcp.Arguments[1])
+	}
+}
+
+func TestPromptGetResponseToMCP(t *testing.T) {
+	resp := &pluginv1.PromptGetResponse{
+		Description: "Test prompt result",
+		Messages: []*pluginv1.PromptMessage{
+			{
+				Role:    "user",
+				Content: &pluginv1.ContentBlock{Type: "text", Text: "Hello world"},
+			},
+			{
+				Role:    "assistant",
+				Content: &pluginv1.ContentBlock{Type: "text", Text: "Hi there"},
+			},
+		},
+	}
+
+	mcp := PromptGetResponseToMCP(resp)
+	if mcp.Description != "Test prompt result" {
+		t.Errorf("description: got %q", mcp.Description)
+	}
+	if len(mcp.Messages) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(mcp.Messages))
+	}
+	if mcp.Messages[0].Role != "user" || mcp.Messages[0].Content.Text != "Hello world" {
+		t.Errorf("message 0: got %+v", mcp.Messages[0])
+	}
+	if mcp.Messages[1].Role != "assistant" || mcp.Messages[1].Content.Text != "Hi there" {
+		t.Errorf("message 1: got %+v", mcp.Messages[1])
 	}
 }
 
