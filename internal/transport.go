@@ -28,31 +28,64 @@ type Sender interface {
 	Send(ctx context.Context, req *pluginv1.PluginRequest) (*pluginv1.PluginResponse, error)
 }
 
+// OnDisconnect is called when the transport's Run loop exits (client
+// disconnected). It receives the session ID so the caller can clean up
+// session-scoped resources like feature locks.
+type OnDisconnect func(sessionID string)
+
 // StdioTransport reads JSON-RPC from an input reader, dispatches each message
 // through the orchestrator, and writes JSON-RPC responses to an output writer.
 type StdioTransport struct {
-	sender Sender
-	reader *bufio.Scanner
-	writer io.Writer
-	mu     sync.Mutex // protects writer
+	sender       Sender
+	reader       *bufio.Scanner
+	writer       io.Writer
+	mu           sync.Mutex // protects writer
+	sessionID    string
+	onDisconnect OnDisconnect
 }
 
 // NewStdioTransport creates a new StdioTransport that reads from in and writes
 // to out. The sender is used to communicate with the orchestrator.
-func NewStdioTransport(sender Sender, in io.Reader, out io.Writer) *StdioTransport {
+// The optional onDisconnect callback is invoked when the Run loop exits.
+func NewStdioTransport(sender Sender, in io.Reader, out io.Writer, opts ...func(*StdioTransport)) *StdioTransport {
 	scanner := bufio.NewScanner(in)
 	scanner.Buffer(make([]byte, 0, maxScannerBuffer), maxScannerBuffer)
-	return &StdioTransport{
+	t := &StdioTransport{
 		sender: sender,
 		reader: scanner,
 		writer: out,
+	}
+	for _, opt := range opts {
+		opt(t)
+	}
+	return t
+}
+
+// WithOnDisconnect sets a callback invoked when the transport exits.
+func WithOnDisconnect(fn OnDisconnect) func(*StdioTransport) {
+	return func(t *StdioTransport) {
+		t.onDisconnect = fn
 	}
 }
 
 // Run reads lines from the input until EOF or the context is cancelled. Each
 // line is parsed as a JSON-RPC 2.0 request and dispatched to the appropriate
 // handler. Responses are written as single JSON lines to the output.
+//
+// tools/call requests are dispatched in goroutines so that long-running tool
+// calls (e.g. send_message with wait=true) don't block subsequent requests
+// (e.g. get_pending_permission polls). The writer is mutex-protected so
+// concurrent response writes are safe. A WaitGroup ensures all in-flight
+// requests complete before Run returns.
 func (t *StdioTransport) Run(ctx context.Context) error {
+	var wg sync.WaitGroup
+	defer func() {
+		wg.Wait()
+		if t.onDisconnect != nil && t.sessionID != "" {
+			t.onDisconnect(t.sessionID)
+		}
+	}()
+
 	for t.reader.Scan() {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -76,6 +109,21 @@ func (t *StdioTransport) Run(ctx context.Context) error {
 			if writeErr := t.writeResponse(resp); writeErr != nil {
 				return fmt.Errorf("write parse error response: %w", writeErr)
 			}
+			continue
+		}
+
+		// Dispatch tools/call concurrently so long-running calls don't block
+		// the read loop. Other methods (initialize, ping, list) are fast and
+		// handled inline to preserve ordering where it matters.
+		if req.Method == "tools/call" {
+			wg.Add(1)
+			go func(r protocol.JSONRPCRequest) {
+				defer wg.Done()
+				resp := t.dispatch(ctx, &r)
+				if resp != nil {
+					_ = t.writeResponse(resp)
+				}
+			}(req)
 			continue
 		}
 

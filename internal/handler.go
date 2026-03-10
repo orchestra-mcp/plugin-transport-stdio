@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/google/uuid"
 	pluginv1 "github.com/orchestra-mcp/gen-go/orchestra/plugin/v1"
 	"github.com/orchestra-mcp/sdk-go/protocol"
 	"google.golang.org/protobuf/types/known/structpb"
@@ -13,6 +14,9 @@ import (
 // handleInitialize responds to the MCP initialize handshake with the server's
 // protocol version and capabilities. No orchestrator communication is needed.
 func (t *StdioTransport) handleInitialize(req *protocol.JSONRPCRequest) *protocol.JSONRPCResponse {
+	// Generate a unique session ID for this connection.
+	t.sessionID = uuid.New().String()
+
 	return &protocol.JSONRPCResponse{
 		JSONRPC: "2.0",
 		ID:      req.ID,
@@ -26,6 +30,7 @@ func (t *StdioTransport) handleInitialize(req *protocol.JSONRPCRequest) *protoco
 				Name:    "orchestra",
 				Version: "1.0.0",
 			},
+			SessionID: t.sessionID,
 		},
 	}
 }
@@ -146,6 +151,7 @@ func (t *StdioTransport) handleToolsCall(ctx context.Context, req *protocol.JSON
 				ToolName:     params.Name,
 				Arguments:    args,
 				CallerPlugin: "transport.stdio",
+				SessionId:    t.sessionID,
 			},
 		},
 	})
