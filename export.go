@@ -27,6 +27,15 @@ func WithOnDisconnect(fn func(sessionID string)) TransportOption {
 	}
 }
 
+// WithEventChannel sets a channel of EventDelivery messages that the transport
+// pushes as JSON-RPC notifications to the output. Used for real-time event
+// streaming to connected IDE clients.
+func WithEventChannel(ch <-chan *pluginv1.EventDelivery) TransportOption {
+	return func(t *internal.StdioTransport) {
+		internal.WithEventChannel(ch)(t)
+	}
+}
+
 // Transport wraps the internal StdioTransport for public use.
 type Transport struct {
 	t *internal.StdioTransport
@@ -46,4 +55,10 @@ func NewTransport(sender Sender, in io.Reader, out io.Writer, opts ...TransportO
 // until EOF or context cancellation.
 func (t *Transport) Run(ctx context.Context) error {
 	return t.t.Run(ctx)
+}
+
+// SendToolsListChanged sends a notifications/tools/list_changed notification
+// to the connected client, prompting it to re-fetch the tool list.
+func (t *Transport) SendToolsListChanged() {
+	t.t.SendToolsListChanged()
 }

@@ -52,7 +52,7 @@ func parseJSONRPCResponse(t *testing.T, raw string) protocol.JSONRPCResponse {
 // --- Tests ---
 
 func TestInitialize(t *testing.T) {
-	reqJSON := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"claude","version":"1.0.0"}}}`
+	reqJSON := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"claude","version":"1.0.0"}}}`
 
 	raw := runSingleRequest(t, &mockSender{}, reqJSON)
 	resp := parseJSONRPCResponse(t, raw)
@@ -74,8 +74,8 @@ func TestInitialize(t *testing.T) {
 		t.Fatalf("unmarshal init result: %v", err)
 	}
 
-	if initResult.ProtocolVersion != "2024-11-05" {
-		t.Errorf("protocolVersion: got %q, want %q", initResult.ProtocolVersion, "2024-11-05")
+	if initResult.ProtocolVersion != protocol.MCPProtocolVersion {
+		t.Errorf("protocolVersion: got %q, want %q", initResult.ProtocolVersion, protocol.MCPProtocolVersion)
 	}
 	if initResult.ServerInfo.Name != "orchestra" {
 		t.Errorf("serverInfo.name: got %q, want %q", initResult.ServerInfo.Name, "orchestra")
@@ -418,7 +418,7 @@ func TestEmptyLines(t *testing.T) {
 // --- Prompts tests ---
 
 func TestInitializeHasPromptsCapability(t *testing.T) {
-	reqJSON := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0.0"}}}`
+	reqJSON := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1.0.0"}}}`
 
 	raw := runSingleRequest(t, &mockSender{}, reqJSON)
 	resp := parseJSONRPCResponse(t, raw)
@@ -819,6 +819,471 @@ func TestPromptGetResponseToMCP(t *testing.T) {
 	}
 	if mcp.Messages[1].Role != "assistant" || mcp.Messages[1].Content.Text != "Hi there" {
 		t.Errorf("message 1: got %+v", mcp.Messages[1])
+	}
+}
+
+// --- Logging tests ---
+
+func TestInitializeHasLoggingCapability(t *testing.T) {
+	reqJSON := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1.0.0"}}}`
+
+	raw := runSingleRequest(t, &mockSender{}, reqJSON)
+	resp := parseJSONRPCResponse(t, raw)
+
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %+v", resp.Error)
+	}
+
+	resultBytes, _ := json.Marshal(resp.Result)
+	var initResult protocol.MCPInitializeResult
+	if err := json.Unmarshal(resultBytes, &initResult); err != nil {
+		t.Fatalf("unmarshal init result: %v", err)
+	}
+
+	if initResult.Capabilities.Logging == nil {
+		t.Error("expected capabilities.logging to be set")
+	}
+}
+
+func TestLoggingSetLevelValid(t *testing.T) {
+	levels := []string{"debug", "info", "notice", "warning", "error", "critical", "alert", "emergency"}
+	for _, level := range levels {
+		reqJSON := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"logging/setLevel","params":{"level":"%s"}}`, level)
+		raw := runSingleRequest(t, &mockSender{}, reqJSON)
+		resp := parseJSONRPCResponse(t, raw)
+
+		if resp.Error != nil {
+			t.Errorf("level %q: unexpected error: %+v", level, resp.Error)
+		}
+		resultBytes, _ := json.Marshal(resp.Result)
+		if string(resultBytes) != "{}" {
+			t.Errorf("level %q: result: got %s, want {}", level, string(resultBytes))
+		}
+	}
+}
+
+func TestLoggingSetLevelInvalid(t *testing.T) {
+	reqJSON := `{"jsonrpc":"2.0","id":1,"method":"logging/setLevel","params":{"level":"verbose"}}`
+	raw := runSingleRequest(t, &mockSender{}, reqJSON)
+	resp := parseJSONRPCResponse(t, raw)
+
+	if resp.Error == nil {
+		t.Fatal("expected error for invalid log level")
+	}
+	if resp.Error.Code != protocol.InvalidParams {
+		t.Errorf("error code: got %d, want %d", resp.Error.Code, protocol.InvalidParams)
+	}
+	if !strings.Contains(resp.Error.Message, "verbose") {
+		t.Errorf("error message should mention 'verbose', got: %s", resp.Error.Message)
+	}
+}
+
+func TestLoggingSetLevelPersists(t *testing.T) {
+	// Send two requests through the same transport: setLevel then a second
+	// setLevel. The transport should accept both and the second should
+	// overwrite the first. We verify by checking no errors.
+	input := strings.Join([]string{
+		`{"jsonrpc":"2.0","id":1,"method":"logging/setLevel","params":{"level":"debug"}}`,
+		`{"jsonrpc":"2.0","id":2,"method":"logging/setLevel","params":{"level":"error"}}`,
+	}, "\n") + "\n"
+
+	in := strings.NewReader(input)
+	var out bytes.Buffer
+	transport := NewStdioTransport(&mockSender{}, in, &out)
+	if err := transport.Run(context.Background()); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 response lines, got %d", len(lines))
+	}
+
+	for i, line := range lines {
+		resp := parseJSONRPCResponse(t, line)
+		if resp.Error != nil {
+			t.Errorf("response %d: unexpected error: %+v", i, resp.Error)
+		}
+	}
+
+	// Verify the transport's log level was set to the last value.
+	if transport.logLevel != protocol.LogLevelError {
+		t.Errorf("logLevel: got %q, want %q", transport.logLevel, protocol.LogLevelError)
+	}
+}
+
+func TestSendLogNotificationAboveThreshold(t *testing.T) {
+	var out bytes.Buffer
+	transport := &StdioTransport{
+		writer:   &out,
+		logLevel: protocol.LogLevelWarning, // threshold = warning (3)
+	}
+
+	// Send an error notification (severity 4 >= warning severity 3).
+	transport.SendLogNotification(protocol.LogLevelError, "test-logger", "something broke")
+
+	raw := strings.TrimSpace(out.String())
+	if raw == "" {
+		t.Fatal("expected log notification output, got empty")
+	}
+
+	var notif map[string]any
+	if err := json.Unmarshal([]byte(raw), &notif); err != nil {
+		t.Fatalf("parse notification: %v", err)
+	}
+
+	if notif["jsonrpc"] != "2.0" {
+		t.Errorf("jsonrpc: got %v", notif["jsonrpc"])
+	}
+	if notif["method"] != "notifications/message" {
+		t.Errorf("method: got %v", notif["method"])
+	}
+
+	params, ok := notif["params"].(map[string]any)
+	if !ok {
+		t.Fatalf("params should be object, got %T", notif["params"])
+	}
+	if params["level"] != "error" {
+		t.Errorf("level: got %v", params["level"])
+	}
+	if params["logger"] != "test-logger" {
+		t.Errorf("logger: got %v", params["logger"])
+	}
+	if params["data"] != "something broke" {
+		t.Errorf("data: got %v", params["data"])
+	}
+}
+
+func TestSendLogNotificationBelowThreshold(t *testing.T) {
+	var out bytes.Buffer
+	transport := &StdioTransport{
+		writer:   &out,
+		logLevel: protocol.LogLevelError, // threshold = error (4)
+	}
+
+	// Send a warning notification (severity 3 < error severity 4).
+	transport.SendLogNotification(protocol.LogLevelWarning, "test-logger", "just a warning")
+
+	if out.Len() != 0 {
+		t.Errorf("expected no output for below-threshold notification, got: %s", out.String())
+	}
+}
+
+func TestSendLogNotificationAtThreshold(t *testing.T) {
+	var out bytes.Buffer
+	transport := &StdioTransport{
+		writer:   &out,
+		logLevel: protocol.LogLevelInfo, // threshold = info (1)
+	}
+
+	// Send an info notification (severity 1 == info severity 1).
+	transport.SendLogNotification(protocol.LogLevelInfo, "server", "started")
+
+	raw := strings.TrimSpace(out.String())
+	if raw == "" {
+		t.Fatal("expected log notification at exact threshold level")
+	}
+
+	var notif map[string]any
+	if err := json.Unmarshal([]byte(raw), &notif); err != nil {
+		t.Fatalf("parse notification: %v", err)
+	}
+	if notif["method"] != "notifications/message" {
+		t.Errorf("method: got %v", notif["method"])
+	}
+}
+
+func TestLogLevelSeverity(t *testing.T) {
+	cases := []struct {
+		level    protocol.MCPLogLevel
+		severity int
+	}{
+		{protocol.LogLevelDebug, 0},
+		{protocol.LogLevelInfo, 1},
+		{protocol.LogLevelNotice, 2},
+		{protocol.LogLevelWarning, 3},
+		{protocol.LogLevelError, 4},
+		{protocol.LogLevelCritical, 5},
+		{protocol.LogLevelAlert, 6},
+		{protocol.LogLevelEmergency, 7},
+		{"unknown", -1},
+	}
+
+	for _, tc := range cases {
+		got := protocol.LogLevelSeverity(tc.level)
+		if got != tc.severity {
+			t.Errorf("LogLevelSeverity(%q): got %d, want %d", tc.level, got, tc.severity)
+		}
+	}
+}
+
+// --- Resources tests ---
+
+func TestInitializeHasResourcesCapability(t *testing.T) {
+	reqJSON := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1.0.0"}}}`
+
+	raw := runSingleRequest(t, &mockSender{}, reqJSON)
+	resp := parseJSONRPCResponse(t, raw)
+
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %+v", resp.Error)
+	}
+
+	resultBytes, _ := json.Marshal(resp.Result)
+	var initResult protocol.MCPInitializeResult
+	if err := json.Unmarshal(resultBytes, &initResult); err != nil {
+		t.Fatalf("unmarshal init result: %v", err)
+	}
+
+	if initResult.Capabilities.Resources == nil {
+		t.Error("expected capabilities.resources to be set")
+	}
+}
+
+func TestResourcesList(t *testing.T) {
+	sender := &mockSender{
+		sendFunc: func(ctx context.Context, req *pluginv1.PluginRequest) (*pluginv1.PluginResponse, error) {
+			sl := req.GetStorageList()
+			if sl == nil {
+				return &pluginv1.PluginResponse{
+					Response: &pluginv1.PluginResponse_StorageList{
+						StorageList: &pluginv1.StorageListResponse{},
+					},
+				}, nil
+			}
+			// Return entries only for features/ prefix.
+			if sl.Prefix == "features/" {
+				return &pluginv1.PluginResponse{
+					Response: &pluginv1.PluginResponse_StorageList{
+						StorageList: &pluginv1.StorageListResponse{
+							Entries: []*pluginv1.StorageEntry{
+								{Path: "features/FEAT-001.md"},
+								{Path: "features/FEAT-002.md"},
+							},
+						},
+					},
+				}, nil
+			}
+			return &pluginv1.PluginResponse{
+				Response: &pluginv1.PluginResponse_StorageList{
+					StorageList: &pluginv1.StorageListResponse{},
+				},
+			}, nil
+		},
+	}
+
+	reqJSON := `{"jsonrpc":"2.0","id":1,"method":"resources/list"}`
+	raw := runSingleRequest(t, sender, reqJSON)
+	resp := parseJSONRPCResponse(t, raw)
+
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %+v", resp.Error)
+	}
+
+	resultBytes, _ := json.Marshal(resp.Result)
+	var result struct {
+		Resources []protocol.MCPResource `json:"resources"`
+	}
+	if err := json.Unmarshal(resultBytes, &result); err != nil {
+		t.Fatalf("unmarshal resources list result: %v", err)
+	}
+
+	if len(result.Resources) != 2 {
+		t.Fatalf("expected 2 resources, got %d", len(result.Resources))
+	}
+	if result.Resources[0].URI != "orchestra://features/FEAT-001" {
+		t.Errorf("resource 0 URI: got %q", result.Resources[0].URI)
+	}
+	if result.Resources[0].Name != "FEAT-001" {
+		t.Errorf("resource 0 name: got %q", result.Resources[0].Name)
+	}
+	if result.Resources[0].MimeType != "text/markdown" {
+		t.Errorf("resource 0 mimeType: got %q", result.Resources[0].MimeType)
+	}
+	if result.Resources[1].URI != "orchestra://features/FEAT-002" {
+		t.Errorf("resource 1 URI: got %q", result.Resources[1].URI)
+	}
+}
+
+func TestResourcesRead(t *testing.T) {
+	sender := &mockSender{
+		sendFunc: func(ctx context.Context, req *pluginv1.PluginRequest) (*pluginv1.PluginResponse, error) {
+			sr := req.GetStorageRead()
+			if sr == nil {
+				return nil, fmt.Errorf("expected StorageRead request")
+			}
+			if sr.Path != "features/FEAT-001.md" {
+				t.Errorf("storage read path: got %q, want %q", sr.Path, "features/FEAT-001.md")
+			}
+			return &pluginv1.PluginResponse{
+				Response: &pluginv1.PluginResponse_StorageRead{
+					StorageRead: &pluginv1.StorageReadResponse{
+						Content: []byte("# Feature FEAT-001\n\nDescription here."),
+					},
+				},
+			}, nil
+		},
+	}
+
+	reqJSON := `{"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"orchestra://features/FEAT-001"}}`
+	raw := runSingleRequest(t, sender, reqJSON)
+	resp := parseJSONRPCResponse(t, raw)
+
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %+v", resp.Error)
+	}
+
+	resultBytes, _ := json.Marshal(resp.Result)
+	var result struct {
+		Contents []protocol.MCPResourceContent `json:"contents"`
+	}
+	if err := json.Unmarshal(resultBytes, &result); err != nil {
+		t.Fatalf("unmarshal resources read result: %v", err)
+	}
+
+	if len(result.Contents) != 1 {
+		t.Fatalf("expected 1 content, got %d", len(result.Contents))
+	}
+	c := result.Contents[0]
+	if c.URI != "orchestra://features/FEAT-001" {
+		t.Errorf("content URI: got %q", c.URI)
+	}
+	if c.MimeType != "text/markdown" {
+		t.Errorf("content mimeType: got %q", c.MimeType)
+	}
+	if c.Text != "# Feature FEAT-001\n\nDescription here." {
+		t.Errorf("content text: got %q", c.Text)
+	}
+}
+
+func TestResourcesReadMissingURI(t *testing.T) {
+	reqJSON := `{"jsonrpc":"2.0","id":1,"method":"resources/read","params":{}}`
+	raw := runSingleRequest(t, &mockSender{}, reqJSON)
+	resp := parseJSONRPCResponse(t, raw)
+
+	if resp.Error == nil {
+		t.Fatal("expected error for missing URI")
+	}
+	if resp.Error.Code != protocol.InvalidParams {
+		t.Errorf("error code: got %d, want %d", resp.Error.Code, protocol.InvalidParams)
+	}
+}
+
+func TestResourcesReadBadScheme(t *testing.T) {
+	reqJSON := `{"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"https://example.com/foo"}}`
+	raw := runSingleRequest(t, &mockSender{}, reqJSON)
+	resp := parseJSONRPCResponse(t, raw)
+
+	if resp.Error == nil {
+		t.Fatal("expected error for bad URI scheme")
+	}
+	if resp.Error.Code != protocol.InvalidParams {
+		t.Errorf("error code: got %d, want %d", resp.Error.Code, protocol.InvalidParams)
+	}
+}
+
+func TestResourcesReadUnknownType(t *testing.T) {
+	reqJSON := `{"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"orchestra://unknown/foo"}}`
+	raw := runSingleRequest(t, &mockSender{}, reqJSON)
+	resp := parseJSONRPCResponse(t, raw)
+
+	if resp.Error == nil {
+		t.Fatal("expected error for unknown resource type")
+	}
+	if resp.Error.Code != protocol.InvalidParams {
+		t.Errorf("error code: got %d, want %d", resp.Error.Code, protocol.InvalidParams)
+	}
+}
+
+func TestResourceTemplatesList(t *testing.T) {
+	reqJSON := `{"jsonrpc":"2.0","id":1,"method":"resources/templates/list"}`
+	raw := runSingleRequest(t, &mockSender{}, reqJSON)
+	resp := parseJSONRPCResponse(t, raw)
+
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %+v", resp.Error)
+	}
+
+	resultBytes, _ := json.Marshal(resp.Result)
+	var result struct {
+		ResourceTemplates []protocol.MCPResourceTemplate `json:"resourceTemplates"`
+	}
+	if err := json.Unmarshal(resultBytes, &result); err != nil {
+		t.Fatalf("unmarshal templates list result: %v", err)
+	}
+
+	if len(result.ResourceTemplates) != 3 {
+		t.Fatalf("expected 3 templates, got %d", len(result.ResourceTemplates))
+	}
+
+	expected := []string{
+		"orchestra://features/{id}",
+		"orchestra://notes/{id}",
+		"orchestra://docs/{id}",
+	}
+	for i, tmpl := range result.ResourceTemplates {
+		if tmpl.URITemplate != expected[i] {
+			t.Errorf("template %d URI: got %q, want %q", i, tmpl.URITemplate, expected[i])
+		}
+		if tmpl.MimeType != "text/markdown" {
+			t.Errorf("template %d mimeType: got %q", i, tmpl.MimeType)
+		}
+	}
+}
+
+// --- listChanged tests ---
+
+func TestInitializeHasListChangedCapability(t *testing.T) {
+	reqJSON := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1.0.0"}}}`
+
+	raw := runSingleRequest(t, &mockSender{}, reqJSON)
+	resp := parseJSONRPCResponse(t, raw)
+
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %+v", resp.Error)
+	}
+
+	resultBytes, _ := json.Marshal(resp.Result)
+	var initResult protocol.MCPInitializeResult
+	if err := json.Unmarshal(resultBytes, &initResult); err != nil {
+		t.Fatalf("unmarshal init result: %v", err)
+	}
+
+	if initResult.Capabilities.Tools == nil {
+		t.Fatal("expected capabilities.tools to be set")
+	}
+	if !initResult.Capabilities.Tools.ListChanged {
+		t.Error("expected capabilities.tools.listChanged to be true")
+	}
+}
+
+func TestSendToolsListChanged(t *testing.T) {
+	var out bytes.Buffer
+	transport := &StdioTransport{
+		writer: &out,
+	}
+
+	transport.SendToolsListChanged()
+
+	raw := strings.TrimSpace(out.String())
+	if raw == "" {
+		t.Fatal("expected tools list changed notification output, got empty")
+	}
+
+	var notif map[string]any
+	if err := json.Unmarshal([]byte(raw), &notif); err != nil {
+		t.Fatalf("parse notification: %v", err)
+	}
+
+	if notif["jsonrpc"] != "2.0" {
+		t.Errorf("jsonrpc: got %v", notif["jsonrpc"])
+	}
+	if notif["method"] != "notifications/tools/list_changed" {
+		t.Errorf("method: got %v", notif["method"])
+	}
+	// Should have no id (it's a notification).
+	if _, hasID := notif["id"]; hasID {
+		t.Error("notification should not have an id field")
 	}
 }
 

@@ -10,12 +10,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"strings"
 	"sync"
 
 	pluginv1 "github.com/orchestra-mcp/gen-go/orchestra/plugin/v1"
 	"github.com/orchestra-mcp/sdk-go/protocol"
+	"google.golang.org/protobuf/encoding/protojson"
 )
 
 // maxScannerBuffer is 10 MB, large enough for big JSON-RPC tool responses.
@@ -41,7 +42,9 @@ type StdioTransport struct {
 	writer       io.Writer
 	mu           sync.Mutex // protects writer
 	sessionID    string
+	logLevel     protocol.MCPLogLevel // minimum level for log notifications (default: warning)
 	onDisconnect OnDisconnect
+	eventCh      <-chan *pluginv1.EventDelivery
 }
 
 // NewStdioTransport creates a new StdioTransport that reads from in and writes
@@ -51,9 +54,10 @@ func NewStdioTransport(sender Sender, in io.Reader, out io.Writer, opts ...func(
 	scanner := bufio.NewScanner(in)
 	scanner.Buffer(make([]byte, 0, maxScannerBuffer), maxScannerBuffer)
 	t := &StdioTransport{
-		sender: sender,
-		reader: scanner,
-		writer: out,
+		sender:   sender,
+		reader:   scanner,
+		writer:   out,
+		logLevel: protocol.LogLevelWarning,
 	}
 	for _, opt := range opts {
 		opt(t)
@@ -65,6 +69,15 @@ func NewStdioTransport(sender Sender, in io.Reader, out io.Writer, opts ...func(
 func WithOnDisconnect(fn OnDisconnect) func(*StdioTransport) {
 	return func(t *StdioTransport) {
 		t.onDisconnect = fn
+	}
+}
+
+// WithEventChannel sets a channel of EventDelivery messages that the transport
+// pushes as JSON-RPC notifications to the output. Used for real-time event
+// streaming to connected IDE clients (Claude Code, Cursor, etc.).
+func WithEventChannel(ch <-chan *pluginv1.EventDelivery) func(*StdioTransport) {
+	return func(t *StdioTransport) {
+		t.eventCh = ch
 	}
 }
 
@@ -85,6 +98,45 @@ func (t *StdioTransport) Run(ctx context.Context) error {
 			t.onDisconnect(t.sessionID)
 		}
 	}()
+
+	// Event push goroutine: reads EventDelivery from the channel and writes
+	// JSON-RPC notifications to the output. IDE clients that don't understand
+	// these notifications safely ignore them per the JSON-RPC spec.
+	if t.eventCh != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for ev := range t.eventCh {
+				payloadMap := map[string]any{
+					"topic":      ev.GetTopic(),
+					"event_type": ev.GetEventType(),
+					"source":     ev.GetSourcePlugin(),
+				}
+				if ev.GetPayload() != nil {
+					raw, err := protojson.Marshal(ev.GetPayload())
+					if err == nil {
+						payloadMap["payload"] = json.RawMessage(raw)
+					}
+				}
+				notif := map[string]any{
+					"jsonrpc": "2.0",
+					"method":  "notifications/event",
+					"params":  payloadMap,
+				}
+				data, err := json.Marshal(notif)
+				if err != nil {
+					continue
+				}
+				data = append(data, '\n')
+				t.mu.Lock()
+				_, writeErr := t.writer.Write(data)
+				t.mu.Unlock()
+				if writeErr != nil {
+					return
+				}
+			}
+		}()
+	}
 
 	for t.reader.Scan() {
 		if ctx.Err() != nil {
@@ -121,7 +173,9 @@ func (t *StdioTransport) Run(ctx context.Context) error {
 				defer wg.Done()
 				resp := t.dispatch(ctx, &r)
 				if resp != nil {
-					_ = t.writeResponse(resp)
+					if err := t.writeResponse(resp); err != nil {
+						slog.Error("failed writing async response", "method", r.Method, "error", err)
+					}
 				}
 			}(req)
 			continue
@@ -163,10 +217,18 @@ func (t *StdioTransport) dispatch(ctx context.Context, req *protocol.JSONRPCRequ
 		return t.handlePromptsList(ctx, req)
 	case "prompts/get":
 		return t.handlePromptsGet(ctx, req)
+	case "logging/setLevel":
+		return t.handleLoggingSetLevel(req)
+	case "resources/list":
+		return t.handleResourcesList(ctx, req)
+	case "resources/read":
+		return t.handleResourcesRead(ctx, req)
+	case "resources/templates/list":
+		return t.handleResourceTemplatesList(req)
 	default:
 		// Notifications get no response.
 		if strings.HasPrefix(req.Method, "notifications/") {
-			log.Printf("notification: %s", req.Method)
+			slog.Debug("notification received", "method", req.Method)
 			return nil
 		}
 		return &protocol.JSONRPCResponse{
@@ -194,4 +256,47 @@ func (t *StdioTransport) writeResponse(resp *protocol.JSONRPCResponse) error {
 	data = append(data, '\n')
 	_, err = t.writer.Write(data)
 	return err
+}
+
+// SendToolsListChanged sends a notifications/tools/list_changed JSON-RPC
+// notification to inform the client that the tool list has been updated.
+func (t *StdioTransport) SendToolsListChanged() {
+	notif := map[string]any{
+		"jsonrpc": "2.0",
+		"method":  "notifications/tools/list_changed",
+	}
+	raw, err := json.Marshal(notif)
+	if err != nil {
+		return
+	}
+	raw = append(raw, '\n')
+	t.mu.Lock()
+	t.writer.Write(raw)
+	t.mu.Unlock()
+}
+
+// SendLogNotification sends a notifications/message JSON-RPC notification to
+// the client if the message's level meets or exceeds the configured threshold.
+func (t *StdioTransport) SendLogNotification(level protocol.MCPLogLevel, logger, data string) {
+	if protocol.LogLevelSeverity(level) < protocol.LogLevelSeverity(t.logLevel) {
+		return
+	}
+
+	notif := map[string]any{
+		"jsonrpc": "2.0",
+		"method":  "notifications/message",
+		"params": map[string]any{
+			"level":  string(level),
+			"logger": logger,
+			"data":   data,
+		},
+	}
+	raw, err := json.Marshal(notif)
+	if err != nil {
+		return
+	}
+	raw = append(raw, '\n')
+	t.mu.Lock()
+	t.writer.Write(raw)
+	t.mu.Unlock()
 }
