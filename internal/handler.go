@@ -29,13 +29,23 @@ func (t *StdioTransport) handleInitialize(req *protocol.JSONRPCRequest) *protoco
 				Logging:   &protocol.MCPLoggingCapability{},
 				Resources: &protocol.MCPResourcesCapability{},
 			},
-			ServerInfo: protocol.MCPServerInfo{
-				Name:    "orchestra",
-				Version: "1.0.0",
-			},
+			ServerInfo: t.effectiveServerInfo(),
 			SessionID: t.sessionID,
 		},
 	}
+}
+
+// effectiveServerInfo returns the server info to use in the initialize response.
+// Falls back to defaults if WithServerInfo was not called.
+func (t *StdioTransport) effectiveServerInfo() protocol.MCPServerInfo {
+	info := t.serverInfo
+	if info.Name == "" {
+		info.Name = "orchestra"
+	}
+	if info.Version == "" {
+		info.Version = "dev"
+	}
+	return info
 }
 
 // handlePing responds with an empty result object (pong).

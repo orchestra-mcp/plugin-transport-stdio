@@ -45,6 +45,7 @@ type StdioTransport struct {
 	logLevel     protocol.MCPLogLevel // minimum level for log notifications (default: warning)
 	onDisconnect OnDisconnect
 	eventCh      <-chan *pluginv1.EventDelivery
+	serverInfo   protocol.MCPServerInfo // injected via WithServerInfo
 }
 
 // NewStdioTransport creates a new StdioTransport that reads from in and writes
@@ -78,6 +79,14 @@ func WithOnDisconnect(fn OnDisconnect) func(*StdioTransport) {
 func WithEventChannel(ch <-chan *pluginv1.EventDelivery) func(*StdioTransport) {
 	return func(t *StdioTransport) {
 		t.eventCh = ch
+	}
+}
+
+// WithServerInfo sets the server name and version returned in the MCP
+// initialize response. If not set, defaults to "orchestra" / "dev".
+func WithServerInfo(info protocol.MCPServerInfo) func(*StdioTransport) {
+	return func(t *StdioTransport) {
+		t.serverInfo = info
 	}
 }
 

@@ -80,8 +80,8 @@ func TestInitialize(t *testing.T) {
 	if initResult.ServerInfo.Name != "orchestra" {
 		t.Errorf("serverInfo.name: got %q, want %q", initResult.ServerInfo.Name, "orchestra")
 	}
-	if initResult.ServerInfo.Version != "1.0.0" {
-		t.Errorf("serverInfo.version: got %q, want %q", initResult.ServerInfo.Version, "1.0.0")
+	if initResult.ServerInfo.Version != "dev" {
+		t.Errorf("serverInfo.version: got %q, want %q", initResult.ServerInfo.Version, "dev")
 	}
 	if initResult.Capabilities.Tools == nil {
 		t.Error("expected capabilities.tools to be set")

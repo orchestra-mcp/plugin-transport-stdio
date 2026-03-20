@@ -7,6 +7,7 @@ import (
 
 	pluginv1 "github.com/orchestra-mcp/gen-go/orchestra/plugin/v1"
 	"github.com/orchestra-mcp/plugin-transport-stdio/internal"
+	"github.com/orchestra-mcp/sdk-go/protocol"
 )
 
 // Sender abstracts the request dispatcher. In production this is the
@@ -33,6 +34,14 @@ func WithOnDisconnect(fn func(sessionID string)) TransportOption {
 func WithEventChannel(ch <-chan *pluginv1.EventDelivery) TransportOption {
 	return func(t *internal.StdioTransport) {
 		internal.WithEventChannel(ch)(t)
+	}
+}
+
+// WithServerInfo sets the server name and version returned in the MCP
+// initialize response.
+func WithServerInfo(info protocol.MCPServerInfo) TransportOption {
+	return func(t *internal.StdioTransport) {
+		internal.WithServerInfo(info)(t)
 	}
 }
 
